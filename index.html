@@ -18,12 +18,15 @@
         h1 { margin-top: 0; font-size: 1.5rem; }
         #controls {
             display: flex;
-            gap: 15px;
+            gap: 10px;
             margin-bottom: 20px;
             background: #2d2d2d;
             padding: 15px;
             border-radius: 8px;
             box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            flex-wrap: wrap;
+            justify-content: center;
+            max-width: 800px;
         }
         button, select {
             background: #4a4a4a;
@@ -36,6 +39,8 @@
         }
         button:hover, select:hover { background: #5a5a5a; }
         button.active { background: #4CAF50; }
+        #btnClearPaths { background: #8e6123; }
+        #btnClearPaths:hover { background: #b07c33; }
         canvas {
             background: #111;
             border: 2px solid #4a4a4a;
@@ -58,19 +63,22 @@
         <button id="btnPlay">Play / Pause</button>
         <button id="btnStep">Step Forward</button>
         <button id="btnClear">Clear Board</button>
+        <button id="btnClearPaths">Clear Paths</button>
         <select id="brushSelect">
-            <option value="0">Eraser (Particle)</option>
             <option value="1">Brush: Single Bit (Particle)</option>
-            <option value="2">Brush: 2-Bit Ball (Macro Particle)</option>
-            <option value="4">Brush: 2x2 Mirror (Static Wall)</option>
+            <option value="2">Brush: 2-Bit Block (Horizontal)</option>
+            <option value="4">Brush: 2x2 Block</option>
+            <option value="8">Brush: Path Marker (Visual Only)</option>
+            <option value="0">Brush: Eraser (Delete Cell)</option>
+            <option value="-1">Brush: Big Eraser (3x3)</option>
         </select>
     </div>
 
     <canvas id="caCanvas" width="600" height="600"></canvas>
 
     <div class="instructions">
-        <p><strong>How to play:</strong> Click and drag on the grid to draw. Use the brush selector to place single particles, 2-component balls, or solid mirrors.</p>
-        <p><strong>Notice the grid:</strong> The faint green squares show the current $2 \times 2$ Margolus block partition. When you step forward, watch how the partition shifts diagonally between the Even and Odd phases, carrying the information forward!</p>
+        <p><strong>How to play:</strong> Click and drag on the grid to draw. Use the brush selector to place particles, blocks, plan routes with the path marker, or erase mistakes.</p>
+        <p><strong>Rules (Margolus 1984):</strong> Single particles move diagonally. Head-on diagonal collisions rotate 90 degrees. All other configurations (sum of 0, 3, 4, or 2 adjacent) remain unchanged.</p>
     </div>
 
 <script>
@@ -82,6 +90,7 @@
     const CELL_SIZE = canvas.width / COLS;
     
     let grid = new Uint8Array(COLS * ROWS);
+    let pathGrid = new Uint8Array(COLS * ROWS); // Independent grid for visual paths
     let phase = 0; // 0 for Even phase, 1 for Odd phase
     let isPlaying = false;
     let intervalId = null;
@@ -89,12 +98,13 @@
 
     // Helper: 1D index from 2D coordinates (with toroidal wrap-around)
     function getIdx(x, y) {
-        const wrapX = (x + COLS) % COLS;
-        const wrapY = (y + ROWS) % ROWS;
+        // Safe wrap-around even for negative offsets (used in big eraser)
+        const wrapX = (((x % COLS) + COLS) % COLS);
+        const wrapY = (((y % ROWS) + ROWS) % ROWS);
         return wrapY * COLS + wrapX;
     }
 
-    // The core Margolus rule for the Billiard Ball Model
+    // The strict Margolus rule for the Billiard Ball Model (1984)
     function step() {
         let newGrid = new Uint8Array(grid);
 
@@ -111,24 +121,25 @@
                 let c = grid[iC];
                 let d = grid[iD];
 
-                let sum = a + b + c + d
-
-                // Default behavior: Do nothing
+                let sum = a + b + c + d;
+                
+                // Default behavior: Identity (no change)
                 let nA = a, nB = b, nC = c, nD = d;
 
-                // Check for movement cases
-                if (sum == 1) { // One unit - diagonal swap
-                    nA = d; nB = c;
-                    nC = b; nD = a;
-                } else if (!a && b && c && !d) { // 2-unit diagonal swaps
-                    nA = 1; nB = 0;
-                    nC = 0; nD = 1;
-                } else if (a && !b && !c && d) { // 2-unit diagonal swaps
-                    nA = 0; nB = 1;
-                    nC = 1; nD = 0;
-                } 
-
-                // In all other cases, the grid stays the same
+                if (sum === 1) {
+                    // Single particle: move diagonally
+                    nA = d; nB = c; nC = b; nD = a;
+                } else if (sum === 2) {
+                    if (a && d) {
+                        // Head-on collision (diagonal \): rotate 90 degrees to (/)
+                        nA = 0; nB = 1; nC = 1; nD = 0;
+                    } else if (b && c) {
+                        // Head-on collision (diagonal /): rotate 90 degrees to (\)
+                        nA = 1; nB = 0; nC = 0; nD = 1;
+                    }
+                    // Note: Adjacent 2-particles remain unchanged
+                }
+                // Note: Sum 0, 3, and 4 remain unchanged
 
                 newGrid[iA] = nA;
                 newGrid[iB] = nB;
@@ -141,11 +152,11 @@
         draw();
     }
 
-    // Render the grid, cells, and partitions
+    // Render the grid, paths, cells, and partitions
     function draw() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        // Draw $2 \times 2$ partition guides
+        // 1. Draw 2x2 partition guides
         ctx.strokeStyle = 'rgba(76, 175, 80, 0.2)'; 
         ctx.lineWidth = 1;
         for (let y = phase; y < ROWS; y += 2) {
@@ -154,8 +165,18 @@
             }
         }
 
-        // Draw active cells (The "Balls" and "Mirrors")
-        ctx.fillStyle = '#00ffcc'; // Neon teal for bits
+        // 2. Draw visual paths (Orange dots)
+        ctx.fillStyle = 'rgba(255, 165, 0, 0.6)'; // Semi-transparent orange
+        for (let y = 0; y < ROWS; y++) {
+            for (let x = 0; x < COLS; x++) {
+                if (pathGrid[getIdx(x, y)]) {
+                    ctx.fillRect(x * CELL_SIZE + CELL_SIZE/3, y * CELL_SIZE + CELL_SIZE/3, CELL_SIZE/3, CELL_SIZE/3);
+                }
+            }
+        }
+
+        // 3. Draw active cells / Balls / Mirrors (Neon Teal)
+        ctx.fillStyle = '#00ffcc'; 
         for (let y = 0; y < ROWS; y++) {
             for (let x = 0; x < COLS; x++) {
                 if (grid[getIdx(x, y)]) {
@@ -174,23 +195,31 @@
         
         const brushType = parseInt(document.getElementById('brushSelect').value);
         
-       
         if (brushType === 1) {
-            // Single Bit
             grid[getIdx(x, y)] = 1;
         } else if (brushType === 2) {
-            // 2-Component Ball (Adjacent horizontal)
             grid[getIdx(x, y)] = 1;
             grid[getIdx(x+1, y)] = 1;
         } else if (brushType === 4) {
-            // 2x2 Mirror Block
             grid[getIdx(x, y)] = 1;
             grid[getIdx(x+1, y)] = 1;
             grid[getIdx(x, y+1)] = 1;
             grid[getIdx(x+1, y+1)] = 1;
+        } else if (brushType === 8) {
+            // Path marker
+            pathGrid[getIdx(x, y)] = 1;
         } else if (brushType === 0) {
-            // Eraser (Delete Cell)
+            // Standard Eraser (clears cell and path)
             grid[getIdx(x, y)] = 0;
+            pathGrid[getIdx(x, y)] = 0;
+        } else if (brushType === -1) {
+            // Big Eraser (3x3 grid around cursor)
+            for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    grid[getIdx(x + dx, y + dy)] = 0;
+                    pathGrid[getIdx(x + dx, y + dy)] = 0;
+                }
+            }
         }
         draw();
     }
@@ -198,13 +227,14 @@
     canvas.addEventListener('mousedown', (e) => { isDrawing = true; handleDraw(e); });
     canvas.addEventListener('mousemove', handleDraw);
     window.addEventListener('mouseup', () => { isDrawing = false; });
+    canvas.addEventListener('mouseleave', () => { isDrawing = false; });
 
     // UI Buttons
     document.getElementById('btnPlay').addEventListener('click', (e) => {
         isPlaying = !isPlaying;
         e.target.classList.toggle('active');
         if (isPlaying) {
-            intervalId = setInterval(step, 100); // 10 ticks per second
+            intervalId = setInterval(step, 100);
         } else {
             clearInterval(intervalId);
         }
@@ -216,7 +246,13 @@
 
     document.getElementById('btnClear').addEventListener('click', () => {
         grid.fill(0);
+        pathGrid.fill(0);
         phase = 0;
+        draw();
+    });
+
+    document.getElementById('btnClearPaths').addEventListener('click', () => {
+        pathGrid.fill(0);
         draw();
     });
 
